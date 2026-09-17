@@ -1,10 +1,12 @@
 # saxo-mcp
 
-An MCP server that gives Claude read-only access to a Saxo Bank account
-through the [Saxo OpenAPI](https://www.developer.saxo/).
+An MCP server that connects Claude to a Saxo Bank account through the
+[Saxo OpenAPI](https://www.developer.saxo/): read the portfolio, quote and
+analyse instruments, and place orders with stops attached.
 
-Currently wired to the **SIM (simulation) environment** with a 24-hour
-developer token. Nothing here can place a trade.
+Currently wired to the **SIM (simulation) environment**. It can place real
+orders there, and every order requires an explicit confirmation step. Read
+"What the analysis is, and is not" before acting on anything it says.
 
 ## Requirements
 
@@ -100,9 +102,50 @@ location, so it works from any working directory with no package install.
 | `get_orders` | Working orders |
 | `search_instruments` | Find an instrument's Uic by name or ticker |
 | `get_quote` | Current bid/ask for a Uic |
-| `place_order` | Place a market or limit order (needs `confirm=True`) |
+| `place_order` | Place a market or limit order, optionally with a stop and target (needs `confirm=True`) |
 | `cancel_order` | Cancel a working order |
-| `close_position` | Close a position at market (needs `confirm=True`) |
+| `close_position` | Close a position at market and retire its stop (needs `confirm=True`) |
+| `analyze_instrument` | Session range, dealing cost, and a sized trade plan |
+| `scan_watchlist` | FX majors and gold ranked by dealing cost against range |
+
+## What the analysis is, and is not
+
+`analyze_instrument` and `scan_watchlist` describe. They do not forecast.
+
+What they compute is real and checkable: the session's high and low, where
+price sits between them, the spread as a share of that range, the session
+range as a share of price, and a position size derived from your equity, a
+risk percentage and a stop distance. The arithmetic is in `analysis.py` and
+is unit-tested against hand-worked values.
+
+What they cannot do is tell you what happens next. This account has no
+access to Saxo's chart service, so there is no price history here at all —
+no trend, no momentum, no moving averages, no backtest. A single session's
+range is not a trend, and a narrow spread is a statement about cost, never
+a reason to trade.
+
+`scan_watchlist` therefore ranks by dealing cost relative to the available
+move, which is an objective measure of *tradability*. It is not a ranking
+of attractiveness, and it says nothing about direction.
+
+Treat the output as evidence to reason over, not a recommendation to act on.
+
+## Risk handling
+
+`place_order` takes `stop_loss` and `take_profit`, sent as related orders
+alongside the entry so a position is never briefly naked between two API
+calls. A stop on the wrong side of a limit entry is refused rather than
+sent. A preview without a stop says so in capitals.
+
+Closing a position also cancels the protective orders left behind on that
+instrument. Saxo keeps a stop working after its position is gone, and an
+orphaned sell stop with nothing to sell will open a short if it triggers —
+verified against SIM, not assumed.
+
+Position sizing follows from the stop distance, so a tight stop implies a
+large position. When the implied size exceeds `SAXO_MAX_ORDER_AMOUNT` the
+plan says so and tells you to widen the stop or lower the risk, rather than
+raise the cap.
 
 ## Safety rails
 
@@ -152,11 +195,16 @@ says so and you run `scripts/login.py` again.
 - **Live environment.** Requires a Saxo app approval process, not a URL swap.
   Do not point this at a real account until the OAuth flow above is in
   place; a daily-expiring token is not something to hang live execution on.
-- **Order types beyond market and limit.** No stops, no trailing stops, no
-  OCO or other bracket orders. Which means a position opened through
-  `place_order` has no attached protection — closing it is a manual step.
-- **Any notion of risk.** No exposure limits, no daily loss cap, no
-  position sizing. `SAXO_MAX_ORDER_AMOUNT` caps one order, nothing more.
+- **Price history.** The chart service returns 404 for this app, so there
+  are no candles and therefore no indicators of any kind. If the app can be
+  granted chart access on the portal, that is the single change that would
+  most improve the analysis.
+- **Trailing stops and OCO.** Stops and targets attach to an entry, but
+  they do not trail, and there is no one-cancels-other handling beyond what
+  Saxo does natively.
+- **Portfolio-level risk.** Sizing is per trade. Nothing tracks total
+  exposure, correlation between open positions, or a daily loss limit. Two
+  trades each risking 1% can still be the same bet twice.
 
 ## Verified on SIM
 

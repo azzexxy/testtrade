@@ -12,8 +12,32 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+from .analysis import observations, parse_snapshot, plan_trade
 from .client import SaxoClient, SaxoError
 from .config import ConfigError, load_config
+
+# FX majors plus gold — liquid, tradable around the clock, and quotable
+# without a market-data subscription.
+WATCHLIST: dict[str, int] = {
+    "EURUSD": 21,
+    "GBPUSD": 31,
+    "USDJPY": 42,
+    "USDCHF": 39,
+    "AUDUSD": 4,
+    "USDCAD": 38,
+    "NZDUSD": 37,
+    "EURGBP": 17,
+    "EURJPY": 18,
+    "GBPJPY": 26,
+    "XAUUSD": 8176,
+}
+
+CAVEAT = (
+    "This is description, not prediction. The account has no chart service, so "
+    "there is no history here — only the current session's range, the cost of "
+    "dealing and where price sits between them. None of it is backtested and "
+    "none of it implies an edge."
+)
 
 mcp = MCPServer(
     name="saxo",
@@ -245,6 +269,8 @@ async def place_order(
     amount: float,
     order_type: str = "Market",
     price: float | None = None,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
     confirm: bool = False,
 ) -> str:
     client = await _get_client()
@@ -264,12 +290,26 @@ async def place_order(
             f"{limit:,.0f}. Raise SAXO_MAX_ORDER_AMOUNT in .env if this is intended."
         )
 
+    # A stop on the wrong side of the entry is not protection: it fills at once.
+    reference = price if price is not None else None
+    if stop_loss is not None and reference is not None:
+        if side == "Buy" and stop_loss >= reference:
+            return f"A buy's stop must sit below the entry; {stop_loss} is not below {reference}."
+        if side == "Sell" and stop_loss <= reference:
+            return f"A sell's stop must sit above the entry; {stop_loss} is not above {reference}."
+
     where = "LIVE (real money)" if client.config.is_live else "SIM (simulated)"
     detail = (
         f"{side} {amount:,.0f} of Uic {uic} ({asset_type}) as {order_type}"
         + (f" @ {price}" if price is not None else " at market")
         + f" on {where}"
     )
+    if stop_loss is not None:
+        detail += f"\n  stop-loss at {stop_loss}"
+    if take_profit is not None:
+        detail += f"\n  take-profit at {take_profit}"
+    if stop_loss is None:
+        detail += "\n  NO STOP-LOSS — this position has nothing limiting its loss."
 
     if not confirm:
         return (
@@ -285,11 +325,15 @@ async def place_order(
             amount=amount,
             order_type=order_type,
             price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
         )
     except SaxoError as exc:
         return f"Order rejected: {exc}"
 
-    return f"Placed on {where}: {detail}\nOrderId: {result.get('OrderId')}"
+    related = [o.get("OrderId") for o in result.get("Orders", [])]
+    extra = f"\nProtective orders: {', '.join(filter(None, related))}" if related else ""
+    return f"Placed on {where}: {detail}\nOrderId: {result.get('OrderId')}{extra}"
 
 
 @mcp.tool(description="Cancel a working order by its OrderId.")
@@ -343,11 +387,168 @@ async def close_position(position_id: str, confirm: bool = False) -> str:
         )
 
     try:
-        result = await client.close_position(position_id)
+        result, cancelled = await client.close_position(position_id)
     except SaxoError as exc:
         return f"Close failed: {exc}"
 
-    return f"Closing order sent on {where}.\n{detail}\nOrderId: {result.get('OrderId')}"
+    tail = ""
+    if cancelled:
+        tail = (
+            f"\nCancelled {len(cancelled)} leftover order(s) on this instrument: "
+            f"{', '.join(cancelled)}\n"
+            "Saxo leaves a position's stop working after the position is gone, and "
+            "an orphaned stop would open a new position in the opposite direction."
+        )
+    return (
+        f"Closing order sent on {where}.\n{detail}\n"
+        f"OrderId: {result.get('OrderId')}{tail}"
+    )
+
+
+@mcp.tool(
+    description=(
+        "Full analysis of one instrument: session range, where price sits in it, "
+        "dealing cost against that range, plus a sized trade plan with a stop and "
+        "target for the given direction. Use this before advising on a trade, and "
+        "relay its caveats rather than presenting the numbers as a forecast."
+    )
+)
+async def analyze_instrument(
+    uic: int,
+    asset_type: str = "FxSpot",
+    direction: str = "buy",
+    risk_pct: float = 1.0,
+    stop: float | None = None,
+    reward_risk: float = 2.0,
+) -> str:
+    client = await _get_client()
+
+    try:
+        raw = await client.snapshot(uic, asset_type)
+        balance = await client.balance()
+    except SaxoError as exc:
+        return f"Error: {exc}"
+
+    snap = parse_snapshot(raw, amount=10000)
+    if snap is None:
+        return (
+            f"No usable price for Uic {uic}. Equities need a per-exchange market "
+            "data subscription; FX does not."
+        )
+
+    equity = balance.get("TotalValue") or balance.get("CashBalance") or 0
+    currency = balance.get("Currency", "")
+    dp = snap.decimals
+
+    lines = [
+        f"{snap.symbol} — {snap.description}",
+        f"  bid {snap.bid:.{dp}f} / ask {snap.ask:.{dp}f}   spread {snap.spread:.{dp}f}",
+        f"  session {snap.low:.{dp}f} – {snap.high:.{dp}f}   change {snap.percent_change:+.2f}%",
+        "",
+        "What the numbers say:",
+    ]
+    lines += [f"  - {note}" for note in observations(snap)]
+
+    plan = plan_trade(snap, direction, equity, risk_pct, stop, reward_risk)
+    if plan is None:
+        lines += ["", "No trade plan: the stop would sit on the entry price."]
+    else:
+        over = plan.size > client.config.max_order_amount
+        lines += [
+            "",
+            f"Trade plan — {plan.direction}, risking {risk_pct:.2f}% of "
+            f"{equity:,.0f} {currency}:",
+            f"  entry   {plan.entry:.{dp}f}",
+            f"  stop    {plan.stop:.{dp}f}   ({plan.stop_distance:.{dp}f} away)",
+            f"  target  {plan.target:.{dp}f}   ({plan.reward_risk:.1f}:1 reward to risk)",
+            f"  size    {plan.size:,.0f} units",
+            f"  risking {plan.risk_cash:,.2f} {currency} if the stop is hit",
+            f"  dealing cost {plan.cost:,.2f} — {plan.cost_pct_of_risk:.1f}% of what you risk",
+        ]
+        if over:
+            lines.append(
+                f"  NOTE size exceeds the {client.config.max_order_amount:,.0f} cap, "
+                "because the stop is close. Widen the stop or lower risk_pct rather "
+                "than raising the cap."
+            )
+        lines.append(
+            f"  To place it: place_order(uic={uic}, asset_type='{asset_type}', "
+            f"buy_sell='{plan.direction}', amount=<size>, "
+            f"stop_loss={plan.stop:.{dp}f}, confirm=True)"
+        )
+
+    lines += ["", CAVEAT]
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    description=(
+        "Scan the FX majors and gold, ranked by how small the spread is against "
+        "the session's range — that is, which are cheapest to trade relative to "
+        "the movement on offer. This ranks tradability, not attractiveness, and "
+        "predicts nothing about direction."
+    )
+)
+async def scan_watchlist(limit: int = 11) -> str:
+    client = await _get_client()
+
+    rows = []
+    failures = []
+    for symbol, uic in WATCHLIST.items():
+        try:
+            raw = await client.snapshot(uic, "FxSpot")
+        except SaxoError as exc:
+            failures.append(f"{symbol}: {exc}")
+            continue
+        snap = parse_snapshot(raw, amount=10000)
+        if snap is None:
+            failures.append(f"{symbol}: no price")
+            continue
+        rows.append((symbol, uic, snap))
+
+    if not rows:
+        return "Nothing quotable.\n" + "\n".join(failures)
+
+    # Cheapest dealing cost relative to the day's move comes first. Instruments
+    # with no range yet sort last: nothing to measure against.
+    rows.sort(key=lambda r: r[2].spread_pct_of_range or float("inf"))
+
+    out = [
+        f"{'symbol':<8} {'uic':>5} {'chg%':>7} {'range%':>7} {'cost%':>6} {'in range':>9}",
+        "-" * 50,
+    ]
+    for symbol, uic, snap in rows[:limit]:
+        cost = snap.spread_pct_of_range
+        rng = snap.range_pct
+        pos = snap.range_position
+        if pos is None:
+            where_in_range = "-"
+        elif pos > 1:
+            where_in_range = "above"
+        elif pos < 0:
+            where_in_range = "below"
+        else:
+            where_in_range = f"{pos:.0%}"
+        out.append(
+            f"{symbol:<8} {uic:>5} {snap.percent_change:>+7.2f} "
+            f"{(f'{rng:.2f}' if rng is not None else '   -'):>7} "
+            f"{(f'{cost:.1f}' if cost is not None else '  -'):>6} "
+            f"{where_in_range:>9}"
+        )
+
+    out += [
+        "",
+        "cost% is the spread as a share of the session range — lower is cheaper "
+        "to trade. in range is where price sits between the session low and high.",
+        "",
+        "Ranked by dealing cost alone. A cheap spread is not a reason to trade, "
+        "and nothing here says which way anything is going.",
+        "",
+        CAVEAT,
+    ]
+    if failures:
+        out += ["", "Not quotable: " + "; ".join(failures)]
+    return "\n".join(out)
 
 
 def main() -> None:

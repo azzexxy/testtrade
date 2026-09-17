@@ -142,6 +142,19 @@ class SaxoClient:
             FieldGroups="Quote,PriceInfoDetails,DisplayAndFormat",
         )
 
+    async def snapshot(self, uic: int, asset_type: str, amount: float = 10000) -> Any:
+        """Price plus the session's range and dealing costs."""
+        return await self.get(
+            "trade/v1/infoprices",
+            Uic=uic,
+            AssetType=asset_type,
+            Amount=amount,
+            FieldGroups=(
+                "Quote,PriceInfo,PriceInfoDetails,DisplayAndFormat,"
+                "InstrumentPriceDetails,Commissions"
+            ),
+        )
+
     # --- Trading --------------------------------------------------------
 
     async def _load_keys(self) -> None:
@@ -176,9 +189,12 @@ class SaxoClient:
         order_type: str = "Market",
         price: float | None = None,
         duration: str = "DayOrder",
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
     ) -> Any:
+        account_key = await self.account_key()
         payload: dict[str, Any] = {
-            "AccountKey": await self.account_key(),
+            "AccountKey": account_key,
             "Uic": uic,
             "AssetType": asset_type,
             "BuySell": buy_sell,
@@ -189,7 +205,35 @@ class SaxoClient:
         }
         if price is not None:
             payload["OrderPrice"] = price
+
+        # Protective orders ride along with the entry so the position is never
+        # naked, not even for the moment between two API calls.
+        exit_side = "Sell" if buy_sell == "Buy" else "Buy"
+        related = []
+        for level, kind in ((stop_loss, "Stop"), (take_profit, "Limit")):
+            if level is None:
+                continue
+            related.append(
+                {
+                    "AccountKey": account_key,
+                    "Uic": uic,
+                    "AssetType": asset_type,
+                    "BuySell": exit_side,
+                    "Amount": amount,
+                    "OrderType": kind,
+                    "OrderPrice": level,
+                    "OrderDuration": {"DurationType": "GoodTillCancel"},
+                    "ManualOrder": True,
+                }
+            )
+        if related:
+            payload["Orders"] = related
+
         return await self.post("trade/v2/orders", payload)
+
+    async def working_orders_for_uic(self, uic: int) -> list[dict[str, Any]]:
+        data = await self.orders()
+        return [o for o in data.get("Data", []) if o.get("Uic") == uic]
 
     async def cancel_order(self, order_id: str) -> Any:
         return await self.delete(
@@ -203,18 +247,37 @@ class SaxoClient:
             FieldGroups="DisplayAndFormat,PositionBase,PositionView",
         )
 
-    async def close_position(self, position_id: str) -> Any:
-        """Close by placing the opposing market order for the same size."""
+    async def close_position(self, position_id: str) -> tuple[Any, list[str]]:
+        """Close at market, then cancel the protective orders left behind.
+
+        Saxo does not retire a position's stop when the position goes, and an
+        orphaned stop is not harmless: a sell stop with nothing to sell opens a
+        short if it triggers. Returns the closing order and the ids cancelled.
+        """
         data = await self.position(position_id)
         base = data.get("PositionBase", {})
         amount = base.get("Amount")
         if amount is None:
             raise SaxoError(f"Position {position_id} has no amount to close.")
 
-        return await self.place_order(
-            uic=base["Uic"],
+        uic = base["Uic"]
+        result = await self.place_order(
+            uic=uic,
             asset_type=base["AssetType"],
             buy_sell="Sell" if amount > 0 else "Buy",
             amount=abs(amount),
             order_type="Market",
         )
+
+        cancelled: list[str] = []
+        for order in await self.working_orders_for_uic(uic):
+            order_id = order.get("OrderId")
+            if not order_id:
+                continue
+            try:
+                await self.cancel_order(order_id)
+                cancelled.append(order_id)
+            except SaxoError:
+                # Report what did get cancelled rather than failing the close.
+                pass
+        return result, cancelled
