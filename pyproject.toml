@@ -1,0 +1,20 @@
+[project]
+name = "saxo-mcp"
+version = "0.1.0"
+description = "MCP server exposing the Saxo Bank OpenAPI to Claude"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+saxo-mcp = "saxo_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["saxo_mcp"]

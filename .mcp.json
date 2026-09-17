@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "saxo": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "saxo_mcp.server"],
+      "env": {}
+    }
+  }
+}
