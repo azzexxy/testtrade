@@ -170,7 +170,11 @@ def current_access_token(config: Config | None = None) -> tuple[str, str]:
     if config.token:
         return config.token, "24-hour token"
 
+    store = config.token_store_path
     raise AuthError(
-        "No usable credentials. Run scripts/login.py to sign in, or set "
-        "SAXO_TOKEN in .env."
+        "No usable credentials. Checked, in order:\n"
+        f"  SAXO_APP_KEY  {'set' if config.can_oauth else 'NOT SET'}\n"
+        f"  token store   {store} — {'found' if store.exists() else 'NOT FOUND'}\n"
+        f"  SAXO_TOKEN    {'set' if config.token else 'EMPTY'}\n"
+        "Run scripts/login.py to sign in, or set SAXO_TOKEN in .env."
     )

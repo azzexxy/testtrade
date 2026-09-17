@@ -41,20 +41,30 @@ PAGE = b"""<!doctype html><meta charset="utf-8"><title>Saxo login</title>
 
 class Callback(BaseHTTPRequestHandler):
     result: dict[str, str] = {}
+    done = threading.Event()
 
     def do_GET(self) -> None:  # noqa: N802
-        query = parse_qs(urlparse(self.path).query)
-        Callback.result = {k: v[0] for k, v in query.items()}
+        query = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
 
-        ok = "code" in Callback.result
+        # Browsers fire off favicon and preconnect requests of their own. Only
+        # a request actually carrying the OAuth response ends the wait; anything
+        # else gets a 404 and is ignored, so a stray hit cannot eat the callback.
+        if "code" not in query and "error" not in query:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        Callback.result = query
+        ok = "code" in query
         self.send_response(200 if ok else 400)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         if ok:
             self.wfile.write(PAGE % (b"Signed in", b"You can close this tab."))
         else:
-            error = Callback.result.get("error", "no code returned").encode()
+            error = query.get("error", "no code returned").encode()
             self.wfile.write(PAGE % (b"Login failed", error))
+        Callback.done.set()
 
     def log_message(self, *args: object) -> None:
         pass  # keep the console clean
@@ -94,7 +104,9 @@ def main() -> int:
         print("Something else is probably using it. Free the port and retry.")
         return 1
 
-    thread = threading.Thread(target=server.handle_request, daemon=True)
+    Callback.result = {}
+    Callback.done.clear()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     print(f"Environment: {config.env.upper()}")
@@ -104,12 +116,15 @@ def main() -> int:
     webbrowser.open(url)
 
     print(f"Waiting for the redirect on port {port} ...")
-    thread.join(timeout=300)
+    arrived = Callback.done.wait(timeout=300)
+    server.shutdown()
     server.server_close()
 
     result = Callback.result
-    if not result:
+    if not arrived or not result:
         print("Timed out after 5 minutes with no redirect.")
+        print("If the browser page loaded but nothing happened here, check that")
+        print(f"the app's redirect URI is exactly {config.redirect_uri}")
         return 1
     if "error" in result:
         print(f"Saxo refused the login: {result.get('error')} "
@@ -130,7 +145,7 @@ def main() -> int:
         return 1
 
     mins = (tokens.expires_at - time.time()) / 60
-    print(f"\nSigned in. Tokens written to {config.token_store_path.name}")
+    print(f"\nSigned in. Tokens written to {config.token_store_path}")
     print(f"Access token valid ~{mins:.0f} min; refreshes automatically from here.")
     return 0
 
