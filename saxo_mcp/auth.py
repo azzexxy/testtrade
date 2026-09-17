@@ -101,7 +101,26 @@ def _token_request(config: Config, form: dict[str, str]) -> dict[str, Any]:
         raise AuthError(f"Could not reach the token endpoint: {exc}") from exc
 
     if response.status_code >= 400:
-        raise AuthError(f"{response.status_code} from token endpoint: {response.text[:400]}")
+        mode = "client secret (Basic auth)" if config.app_secret else "PKCE (no secret)"
+        detail = response.text[:400].strip() or "(empty body)"
+        hint = ""
+        if not config.app_secret and response.status_code in (400, 401):
+            hint = (
+                "\n\nMost likely the app is registered as a confidential client, "
+                "which authenticates with its secret rather than PKCE. Saxo accepts "
+                "PKCE only for apps created with it enabled.\n"
+                "Fix: put the app's secret in SAXO_APP_SECRET in .env and try again. "
+                "The portal shows the secret only at creation, so recreate the app "
+                "if you no longer have it."
+            )
+        elif config.app_secret and response.status_code in (400, 401):
+            hint = (
+                "\n\nCheck that SAXO_APP_SECRET matches this AppKey exactly, and "
+                "that both belong to the same environment as SAXO_ENV."
+            )
+        raise AuthError(
+            f"{response.status_code} from token endpoint using {mode}: {detail}{hint}"
+        )
     return response.json()
 
 
