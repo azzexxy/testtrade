@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
 
+from .auth import AuthError, current_access_token
 from .config import Config, load_config
 
 TIMEOUT = httpx.Timeout(20.0, connect=10.0)
@@ -24,17 +26,28 @@ class SaxoClient:
         self.config = config or load_config()
         self._account_key: str | None = None
         self._client_key: str | None = None
+        self.auth_source = "unknown"
         self._client = httpx.AsyncClient(
             base_url=self.config.gateway,
-            headers={
-                "Authorization": f"Bearer {self.config.token}",
-                "Accept": "application/json",
-            },
+            headers={"Accept": "application/json"},
             timeout=TIMEOUT,
         )
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def _auth_header(self) -> dict[str, str]:
+        """Fetch a valid token per request, refreshing when it has aged out.
+
+        current_access_token uses a blocking HTTP call on the refresh path, so
+        it runs in a worker thread rather than stalling the event loop.
+        """
+        try:
+            token, source = await asyncio.to_thread(current_access_token, self.config)
+        except AuthError as exc:
+            raise SaxoError(str(exc), status=401) from None
+        self.auth_source = source
+        return {"Authorization": f"Bearer {token}"}
 
     async def request(
         self,
@@ -45,19 +58,24 @@ class SaxoClient:
         json: dict[str, Any] | None = None,
     ) -> Any:
         clean = {k: v for k, v in (params or {}).items() if v is not None}
+        headers = await self._auth_header()
         try:
             response = await self._client.request(
-                method, path.lstrip("/"), params=clean, json=json
+                method, path.lstrip("/"), params=clean, json=json, headers=headers
             )
         except httpx.RequestError as exc:
             raise SaxoError(f"Network error calling {path}: {exc}") from exc
 
         if response.status_code == 401:
-            raise SaxoError(
-                "401 Unauthorized. A 24-hour token expires daily — generate a fresh "
-                "one at developer.saxo and update SAXO_TOKEN in .env.",
-                status=401,
-            )
+            if self.auth_source.startswith("oauth"):
+                advice = "Run scripts/login.py to sign in again."
+            else:
+                advice = (
+                    "A 24-hour token expires daily — generate a fresh one at "
+                    "developer.saxo and update SAXO_TOKEN in .env, or switch to "
+                    "OAuth with scripts/login.py."
+                )
+            raise SaxoError(f"401 Unauthorized. {advice}", status=401)
         if response.status_code == 403:
             raise SaxoError(
                 f"403 Forbidden on {path}. The app or user lacks permission for this "

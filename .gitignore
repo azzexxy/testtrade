@@ -4,6 +4,7 @@
 !.env.example
 *.token
 token_store.json
+token_store.*.json
 
 # Python
 .venv/

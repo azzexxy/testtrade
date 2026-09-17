@@ -33,6 +33,9 @@ class ConfigError(RuntimeError):
     pass
 
 
+TOKEN_STORE = Path(__file__).resolve().parent.parent / "token_store.json"
+
+
 @dataclass(frozen=True)
 class Config:
     env: str
@@ -40,10 +43,22 @@ class Config:
     gateway: str
     auth_host: str
     max_order_amount: float
+    app_key: str = ""
+    app_secret: str = ""
+    redirect_uri: str = "http://localhost:8080/callback"
 
     @property
     def is_live(self) -> bool:
         return self.env == "live"
+
+    @property
+    def can_oauth(self) -> bool:
+        return bool(self.app_key)
+
+    @property
+    def token_store_path(self) -> Path:
+        """Per-environment, so a SIM login can never be read as a live one."""
+        return TOKEN_STORE.with_name(f"token_store.{self.env}.json")
 
 
 def load_config() -> Config:
@@ -57,10 +72,15 @@ def load_config() -> Config:
         )
 
     token = os.getenv("SAXO_TOKEN", "").strip()
-    if not token:
+    app_key = os.getenv("SAXO_APP_KEY", "").strip()
+
+    # Either credential is enough on its own: OAuth is preferred, the 24-hour
+    # token is the fallback. Only having neither is fatal.
+    if not token and not app_key:
         hint = "" if _ENV_PATH.exists() else f" (no .env file at {_ENV_PATH})"
         raise ConfigError(
-            f"SAXO_TOKEN is empty. Paste a 24-hour token into .env{hint}"
+            "No credentials. Set SAXO_APP_KEY and run scripts/login.py, or paste "
+            f"a 24-hour token into SAXO_TOKEN in .env{hint}"
         )
 
     raw_max = os.getenv("SAXO_MAX_ORDER_AMOUNT", "100000").strip()
@@ -79,4 +99,9 @@ def load_config() -> Config:
         gateway=GATEWAYS[env],
         auth_host=AUTH_HOSTS[env],
         max_order_amount=max_order_amount,
+        app_key=app_key,
+        app_secret=os.getenv("SAXO_APP_SECRET", "").strip(),
+        redirect_uri=os.getenv(
+            "SAXO_REDIRECT_URI", "http://localhost:8080/callback"
+        ).strip(),
     )

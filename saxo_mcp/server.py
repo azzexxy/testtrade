@@ -57,10 +57,16 @@ async def connection_status() -> str:
         return f"Configured for {client.config.env.upper()} but the call failed: {exc}"
 
     marker = "LIVE — real money" if client.config.is_live else "SIM — simulated money"
+    note = (
+        ""
+        if client.auth_source.startswith("oauth")
+        else "  (expires daily; run scripts/login.py for auto-refreshing OAuth)"
+    )
     return (
         f"Environment: {marker}\n"
         f"Gateway: {client.config.gateway}\n"
         f"User: {user.get('Name')} (id {user.get('UserId')})\n"
+        f"Auth: {client.auth_source}{note}\n"
         f"Market data terms accepted: {user.get('MarketDataViaOpenApiTermsAccepted')}"
     )
 

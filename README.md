@@ -33,9 +33,24 @@ cp .env.example .env
 Upgrading pip is not optional on a fresh macOS install: the bundled pip
 21.2.4 predates PEP 660 and cannot install this project.
 
-Now open `.env` in an editor and paste your 24-hour token after
-`SAXO_TOKEN=`. Get it from [developer.saxo](https://www.developer.saxo/)
-under the 24-hour token section; it expires daily.
+Now open `.env` and fill in one of the two credentials.
+
+**OAuth (preferred).** Set `SAXO_APP_KEY` to your app's key from the
+developer portal, leave `SAXO_APP_SECRET` empty to use PKCE, then:
+
+```bash
+.venv/bin/python scripts/login.py
+```
+
+That opens the Saxo login page, catches the redirect on localhost and
+writes `token_store.sim.json`. From then on the server refreshes its own
+access token — no daily paste. Your app's redirect URI must be registered
+as exactly `http://localhost:8080/callback`.
+
+**24-hour token (fallback).** Paste one after `SAXO_TOKEN=`. Simpler, but
+it dies every day and cannot refresh itself.
+
+If both are present, OAuth wins.
 
 Verify:
 
@@ -113,11 +128,21 @@ return a price.
 Orders on equities are a separate matter from quotes: you can place them
 without a data subscription, you just cannot see the live price first.
 
+## Authentication
+
+Access tokens last about 20 minutes and refresh tokens about an hour. The
+client fetches a token per request and refreshes 90 seconds ahead of
+expiry, so a call never leaves with a token that dies in flight.
+
+Tokens are stored per environment (`token_store.sim.json`,
+`token_store.live.json`) at mode 0600, and both are gitignored. A SIM login
+therefore can never be picked up as a live one.
+
+If the refresh token itself lapses — an hour of inactivity — the next call
+says so and you run `scripts/login.py` again.
+
 ## Not done yet
 
-- **OAuth refresh flow.** Access tokens last ~20 minutes and refresh tokens
-  ~1 hour, so anything unattended needs the code grant from Step 3 rather
-  than a 24-hour token.
 - **Live environment.** Requires a Saxo app approval process, not a URL swap.
   Do not point this at a real account until the OAuth flow above is in
   place; a daily-expiring token is not something to hang live execution on.
