@@ -208,8 +208,9 @@ async def get_quote(uic: int, asset_type: str = "Stock", amount: float = 1) -> s
     if quote.get("PriceTypeBid") == "NoAccess":
         return (
             f"{symbol}: no market-data access for this instrument.\n"
-            "Accept the market data terms at developer.saxo, or subscribe to the "
-            "exchange feed. FX spot generally works without a subscription."
+            "Equity quotes need a subscription for that specific exchange, set up "
+            "under market data on the Saxo portal — accepting the general terms is "
+            "not enough on its own. FX spot needs no subscription and works now."
         )
 
     delay = quote.get("DelayedByMinutes", 0)
@@ -221,6 +222,126 @@ async def get_quote(uic: int, asset_type: str = "Stock", amount: float = 1) -> s
         f"Market: {quote.get('MarketState', 'unknown')}  "
         f"Source: {quote.get('PriceSource', 'unknown')}"
     )
+
+
+@mcp.tool(
+    description=(
+        "Place an order. Requires confirm=True to actually send it — called "
+        "without confirm it returns a preview of what would be sent and places "
+        "nothing. Get uic and asset_type from search_instruments first. Amount "
+        "is in instrument units (FX: currency units, e.g. 10000; stocks: shares)."
+    )
+)
+async def place_order(
+    uic: int,
+    asset_type: str,
+    buy_sell: str,
+    amount: float,
+    order_type: str = "Market",
+    price: float | None = None,
+    confirm: bool = False,
+) -> str:
+    client = await _get_client()
+
+    side = buy_sell.capitalize()
+    if side not in ("Buy", "Sell"):
+        return f"buy_sell must be 'Buy' or 'Sell', got {buy_sell!r}."
+    if amount <= 0:
+        return f"amount must be positive, got {amount}."
+    if order_type.lower() == "limit" and price is None:
+        return "A Limit order needs a price."
+
+    limit = client.config.max_order_amount
+    if amount > limit:
+        return (
+            f"Refusing: amount {amount:,.0f} exceeds the configured ceiling of "
+            f"{limit:,.0f}. Raise SAXO_MAX_ORDER_AMOUNT in .env if this is intended."
+        )
+
+    where = "LIVE (real money)" if client.config.is_live else "SIM (simulated)"
+    detail = (
+        f"{side} {amount:,.0f} of Uic {uic} ({asset_type}) as {order_type}"
+        + (f" @ {price}" if price is not None else " at market")
+        + f" on {where}"
+    )
+
+    if not confirm:
+        return (
+            f"PREVIEW — nothing was sent.\n{detail}\n\n"
+            "Call again with confirm=True to place this order."
+        )
+
+    try:
+        result = await client.place_order(
+            uic=uic,
+            asset_type=asset_type,
+            buy_sell=side,
+            amount=amount,
+            order_type=order_type,
+            price=price,
+        )
+    except SaxoError as exc:
+        return f"Order rejected: {exc}"
+
+    return f"Placed on {where}: {detail}\nOrderId: {result.get('OrderId')}"
+
+
+@mcp.tool(description="Cancel a working order by its OrderId.")
+async def cancel_order(order_id: str) -> str:
+    client = await _get_client()
+    try:
+        result = await client.cancel_order(order_id)
+    except SaxoError as exc:
+        return f"Cancel failed: {exc}"
+
+    cancelled = result.get("Orders", []) if isinstance(result, dict) else []
+    if not cancelled:
+        return f"No order cancelled — is {order_id} still working?"
+    return f"Cancelled order {order_id}."
+
+
+@mcp.tool(
+    description=(
+        "Close an open position by placing the opposing market order. Requires "
+        "confirm=True; without it, returns a preview of what would be closed."
+    )
+)
+async def close_position(position_id: str, confirm: bool = False) -> str:
+    client = await _get_client()
+
+    try:
+        data = await client.position(position_id)
+    except SaxoError as exc:
+        return f"Could not read position {position_id}: {exc}"
+
+    base = data.get("PositionBase", {})
+    view = data.get("PositionView", {})
+    fmt = data.get("DisplayAndFormat", {})
+    amount = base.get("Amount")
+    if amount is None:
+        return f"Position {position_id} has no amount to close."
+
+    where = "LIVE (real money)" if client.config.is_live else "SIM (simulated)"
+    side = "Sell" if amount > 0 else "Buy"
+    detail = (
+        f"{side} {abs(amount):,.0f} {fmt.get('Symbol', base.get('Uic'))} at market "
+        f"to close position {position_id} on {where}\n"
+        f"  opened at {base.get('OpenPrice')}, current P/L "
+        f"{_fmt_money(view.get('ProfitLossOnTrade'), fmt.get('Currency', ''))}"
+    )
+
+    if not confirm:
+        return (
+            f"PREVIEW — nothing was sent.\n{detail}\n\n"
+            "Call again with confirm=True to close it."
+        )
+
+    try:
+        result = await client.close_position(position_id)
+    except SaxoError as exc:
+        return f"Close failed: {exc}"
+
+    return f"Closing order sent on {where}.\n{detail}\nOrderId: {result.get('OrderId')}"
 
 
 def main() -> None:

@@ -79,28 +79,58 @@ location, so it works from any working directory with no package install.
 | `get_orders` | Working orders |
 | `search_instruments` | Find an instrument's Uic by name or ticker |
 | `get_quote` | Current bid/ask for a Uic |
+| `place_order` | Place a market or limit order (needs `confirm=True`) |
+| `cancel_order` | Cancel a working order |
+| `close_position` | Close a position at market (needs `confirm=True`) |
 
 ## Safety rails
 
 - `SAXO_ENV` defaults to `sim`. Reaching live needs `SAXO_ENV=live` **and**
   `SAXO_ALLOW_LIVE=yes` — two independent switches, and a typo in either
   fails back to SIM rather than through to real money.
-- Every balance and status response states which environment produced it,
-  so a figure can't be mistaken for the wrong account.
-- No order-placement tool exists yet. See below.
+- `place_order` and `close_position` do nothing unless called with
+  `confirm=True`. Without it they return a preview of exactly what would be
+  sent, so a loosely-worded request cannot become a trade in one step.
+- `SAXO_MAX_ORDER_AMOUNT` (default 100,000 units) caps order size — a
+  backstop against a misplaced decimal point.
+- Every order, balance and status response names the environment it came
+  from, so a figure or a fill can't be mistaken for the wrong account.
+
+These rails are deliberately dumb and local. They are not a risk system:
+nothing here checks your total exposure, correlation, or daily loss.
 
 ## Market data
 
-The SIM account starts with `MarketDataViaOpenApiTermsAccepted: false`,
-so equity quotes return `NoAccess`. FX spot works without a subscription.
-Accept the market data terms on the developer portal to enable stock quotes.
+FX spot quotes work out of the box, with no subscription.
+
+Equities do not. Accepting the general market-data terms is necessary but
+not sufficient — real-time equity prices need a subscription for each
+specific exchange, arranged under market data on the Saxo portal. With
+terms accepted and no exchange subscriptions, NASDAQ and Xetra both still
+return `NoAccess`, so `get_quote` on a stock will tell you so rather than
+return a price.
+
+Orders on equities are a separate matter from quotes: you can place them
+without a data subscription, you just cannot see the live price first.
 
 ## Not done yet
 
 - **OAuth refresh flow.** Access tokens last ~20 minutes and refresh tokens
   ~1 hour, so anything unattended needs the code grant from Step 3 rather
   than a 24-hour token.
-- **Order placement.** Deliberately absent. A daily-expiring token pasted
-  into a file is the wrong credential to hang trade execution on, and the
-  order path needs its own confirmation rail before Claude can reach it.
 - **Live environment.** Requires a Saxo app approval process, not a URL swap.
+  Do not point this at a real account until the OAuth flow above is in
+  place; a daily-expiring token is not something to hang live execution on.
+- **Order types beyond market and limit.** No stops, no trailing stops, no
+  OCO or other bracket orders. Which means a position opened through
+  `place_order` has no attached protection — closing it is a manual step.
+- **Any notion of risk.** No exposure limits, no daily loss cap, no
+  position sizing. `SAXO_MAX_ORDER_AMOUNT` caps one order, nothing more.
+
+## Verified on SIM
+
+The full loop has been run end to end against the simulation account:
+search EURUSD, quote it, place a 10,000-unit market buy, see the position
+open, close it at market, confirm flat. Limit orders rest and cancel
+correctly. The confirmation and size guards were tested by trying to
+defeat them.

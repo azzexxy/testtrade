@@ -22,6 +22,8 @@ class SaxoError(RuntimeError):
 class SaxoClient:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or load_config()
+        self._account_key: str | None = None
+        self._client_key: str | None = None
         self._client = httpx.AsyncClient(
             base_url=self.config.gateway,
             headers={
@@ -81,6 +83,9 @@ class SaxoClient:
     async def post(self, path: str, payload: dict[str, Any]) -> Any:
         return await self.request("POST", path, json=payload)
 
+    async def delete(self, path: str, **params: Any) -> Any:
+        return await self.request("DELETE", path, params=params)
+
     # --- Portfolio -----------------------------------------------------
 
     async def user_info(self) -> Any:
@@ -117,4 +122,81 @@ class SaxoClient:
             AssetType=asset_type,
             Amount=amount,
             FieldGroups="Quote,PriceInfoDetails,DisplayAndFormat",
+        )
+
+    # --- Trading --------------------------------------------------------
+
+    async def _load_keys(self) -> None:
+        if self._account_key is not None and self._client_key is not None:
+            return
+        data = await self.accounts()
+        rows = data.get("Data", [])
+        if not rows:
+            raise SaxoError("No account found to trade on.")
+        self._account_key = rows[0]["AccountKey"]
+        self._client_key = rows[0]["ClientKey"]
+
+    async def account_key(self) -> str:
+        """The default account's key, cached. Orders are rejected without it."""
+        await self._load_keys()
+        assert self._account_key is not None
+        return self._account_key
+
+    async def client_key(self) -> str:
+        """The client key, cached. Single-position lookups require it."""
+        await self._load_keys()
+        assert self._client_key is not None
+        return self._client_key
+
+    async def place_order(
+        self,
+        *,
+        uic: int,
+        asset_type: str,
+        buy_sell: str,
+        amount: float,
+        order_type: str = "Market",
+        price: float | None = None,
+        duration: str = "DayOrder",
+    ) -> Any:
+        payload: dict[str, Any] = {
+            "AccountKey": await self.account_key(),
+            "Uic": uic,
+            "AssetType": asset_type,
+            "BuySell": buy_sell,
+            "Amount": amount,
+            "OrderType": order_type,
+            "OrderDuration": {"DurationType": duration},
+            "ManualOrder": True,
+        }
+        if price is not None:
+            payload["OrderPrice"] = price
+        return await self.post("trade/v2/orders", payload)
+
+    async def cancel_order(self, order_id: str) -> Any:
+        return await self.delete(
+            f"trade/v2/orders/{order_id}", AccountKey=await self.account_key()
+        )
+
+    async def position(self, position_id: str) -> Any:
+        return await self.get(
+            f"port/v1/positions/{position_id}",
+            ClientKey=await self.client_key(),
+            FieldGroups="DisplayAndFormat,PositionBase,PositionView",
+        )
+
+    async def close_position(self, position_id: str) -> Any:
+        """Close by placing the opposing market order for the same size."""
+        data = await self.position(position_id)
+        base = data.get("PositionBase", {})
+        amount = base.get("Amount")
+        if amount is None:
+            raise SaxoError(f"Position {position_id} has no amount to close.")
+
+        return await self.place_order(
+            uic=base["Uic"],
+            asset_type=base["AssetType"],
+            buy_sell="Sell" if amount > 0 else "Buy",
+            amount=abs(amount),
+            order_type="Market",
         )

@@ -39,6 +39,7 @@ class Config:
     token: str
     gateway: str
     auth_host: str
+    max_order_amount: float
 
     @property
     def is_live(self) -> bool:
@@ -62,9 +63,20 @@ def load_config() -> Config:
             f"SAXO_TOKEN is empty. Paste a 24-hour token into .env{hint}"
         )
 
+    raw_max = os.getenv("SAXO_MAX_ORDER_AMOUNT", "100000").strip()
+    try:
+        max_order_amount = float(raw_max)
+    except ValueError:
+        raise ConfigError(
+            f"SAXO_MAX_ORDER_AMOUNT must be a number, got {raw_max!r}"
+        ) from None
+    if max_order_amount <= 0:
+        raise ConfigError("SAXO_MAX_ORDER_AMOUNT must be greater than zero.")
+
     return Config(
         env=env,
         token=token,
         gateway=GATEWAYS[env],
         auth_host=AUTH_HOSTS[env],
+        max_order_amount=max_order_amount,
     )
