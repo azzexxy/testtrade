@@ -6,28 +6,67 @@ through the [Saxo OpenAPI](https://www.developer.saxo/).
 Currently wired to the **SIM (simulation) environment** with a 24-hour
 developer token. Nothing here can place a trade.
 
+## Requirements
+
+Python **3.10 or newer**. Check this before anything else:
+
+```bash
+python3 --version
+```
+
+macOS ships Python 3.9 with the Xcode command line tools, and the MCP SDK
+does not support it. If you see 3.9, install a newer interpreter first
+(`brew install python@3.12`) and use `python3.12` in place of `python3`
+below.
+
 ## Setup
 
 ```bash
+git clone https://github.com/azzexxy/testtrade
+cd testtrade
 python3 -m venv .venv
-.venv/bin/pip install -e .
-cp .env.example .env     # then paste your 24-hour token into SAXO_TOKEN
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Get the token from [developer.saxo](https://www.developer.saxo/) under the
-24-hour token section. It expires daily; regenerate and update `.env`.
+Upgrading pip is not optional on a fresh macOS install: the bundled pip
+21.2.4 predates PEP 660 and cannot install this project.
 
-Verify the connection:
+Now open `.env` in an editor and paste your 24-hour token after
+`SAXO_TOKEN=`. Get it from [developer.saxo](https://www.developer.saxo/)
+under the 24-hour token section; it expires daily.
+
+Verify:
 
 ```bash
 .venv/bin/python scripts/smoke_test.py
 ```
 
+You should see your name, a 1,000,000 EUR SIM balance, and a live EURUSD
+quote.
+
 ## Using it from Claude
 
-`.mcp.json` registers the server for Claude Code in this directory. Start
-Claude Code here and approve the server when prompted. For Claude Desktop,
-add the same block to `claude_desktop_config.json` with absolute paths.
+**Claude Code** — `.mcp.json` in this repo registers the server. Start
+Claude Code from this directory and approve the server when prompted.
+
+**Claude Desktop** — add this to `claude_desktop_config.json`, using
+absolute paths:
+
+```json
+{
+  "mcpServers": {
+    "saxo": {
+      "command": "/Users/lothar/testtrade/.venv/bin/python",
+      "args": ["/Users/lothar/testtrade/scripts/run_server.py"]
+    }
+  }
+}
+```
+
+The launcher resolves both the package and `.env` relative to its own
+location, so it works from any working directory with no package install.
 
 ## Tools
 

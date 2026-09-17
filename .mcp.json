@@ -2,7 +2,7 @@
   "mcpServers": {
     "saxo": {
       "command": ".venv/bin/python",
-      "args": ["-m", "saxo_mcp.server"],
+      "args": ["scripts/run_server.py"],
       "env": {}
     }
   }

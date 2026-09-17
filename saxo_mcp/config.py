@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Anchor to the repo root rather than the working directory: the server may be
+# launched from anywhere, and a silently-missing .env reads as "token empty".
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_ENV_PATH)
 
 GATEWAYS = {
     "sim": "https://gateway.saxobank.com/sim/openapi",
@@ -53,7 +57,10 @@ def load_config() -> Config:
 
     token = os.getenv("SAXO_TOKEN", "").strip()
     if not token:
-        raise ConfigError("SAXO_TOKEN is empty. Paste a 24-hour token into .env.")
+        hint = "" if _ENV_PATH.exists() else f" (no .env file at {_ENV_PATH})"
+        raise ConfigError(
+            f"SAXO_TOKEN is empty. Paste a 24-hour token into .env{hint}"
+        )
 
     return Config(
         env=env,

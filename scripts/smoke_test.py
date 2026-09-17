@@ -4,6 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
+
+if sys.version_info < (3, 10):
+    print(
+        f"This project needs Python 3.10 or newer; this is {sys.version.split()[0]}.\n"
+        "macOS ships Python 3.9 with the Xcode command line tools, which the MCP\n"
+        "SDK does not support. Install a newer one, e.g.:\n"
+        "    brew install python@3.12\n"
+        "then rebuild the virtualenv with it:\n"
+        "    rm -rf .venv && python3.12 -m venv .venv"
+    )
+    raise SystemExit(1)
+
+# Run from a clone without installing the package first.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from saxo_mcp.client import SaxoClient, SaxoError
 from saxo_mcp.config import ConfigError, load_config
