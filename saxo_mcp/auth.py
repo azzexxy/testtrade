@@ -86,19 +86,38 @@ def build_authorize_url(
     return f"{config.auth_host}/authorize?{urlencode(params)}"
 
 
-def _token_request(config: Config, form: dict[str, str]) -> dict[str, Any]:
+def _post_token(
+    config: Config, form: dict[str, str], use_basic: bool
+) -> httpx.Response:
+    body = dict(form)
     auth = None
-    if config.app_secret:
+    if use_basic:
         auth = (config.app_key, config.app_secret)
     else:
-        form["client_id"] = config.app_key
-
+        body["client_id"] = config.app_key
+        if config.app_secret:
+            body["client_secret"] = config.app_secret
     try:
-        response = httpx.post(
-            f"{config.auth_host}/token", data=form, auth=auth, timeout=30.0
+        return httpx.post(
+            f"{config.auth_host}/token", data=body, auth=auth, timeout=30.0
         )
     except httpx.RequestError as exc:
         raise AuthError(f"Could not reach the token endpoint: {exc}") from exc
+
+
+def _token_request(config: Config, form: dict[str, str]) -> dict[str, Any]:
+    # With a secret, HTTP Basic is what Saxo wants — confirmed by a real login.
+    # Without one, the client id goes in the body alongside the PKCE verifier.
+    # RFC 6749 also allows credentials in the body, so that is kept as a
+    # fallback: a rejected client does not consume the authorization code, so
+    # the retry still has a valid one to send.
+    use_basic = bool(config.app_secret)
+    response = _post_token(config, form, use_basic=use_basic)
+
+    if response.status_code in (400, 401) and config.app_secret:
+        retry = _post_token(config, form, use_basic=not use_basic)
+        if retry.status_code < 400:
+            return retry.json()
 
     if response.status_code >= 400:
         mode = "client secret (Basic auth)" if config.app_secret else "PKCE (no secret)"

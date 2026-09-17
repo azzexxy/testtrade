@@ -35,8 +35,8 @@ Upgrading pip is not optional on a fresh macOS install: the bundled pip
 
 Now open `.env` and fill in one of the two credentials.
 
-**OAuth (preferred).** Set `SAXO_APP_KEY` to your app's key from the
-developer portal, leave `SAXO_APP_SECRET` empty to use PKCE, then:
+**OAuth (preferred).** Set `SAXO_APP_KEY` and `SAXO_APP_SECRET` to your
+app's values from the developer portal, then:
 
 ```bash
 .venv/bin/python scripts/login.py
@@ -46,6 +46,12 @@ That opens the Saxo login page, catches the redirect on localhost and
 writes `token_store.sim.json`. From then on the server refreshes its own
 access token — no daily paste. Your app's redirect URI must be registered
 as exactly `http://localhost:8080/callback`.
+
+The secret is not optional in practice. Leaving it empty selects PKCE,
+which Saxo accepts only for apps created with PKCE enabled; an ordinary
+app registration rejects the exchange with a bare `400 Bad Request`. The
+portal shows the secret once at creation, so recreate the app if you lose
+it.
 
 **24-hour token (fallback).** Paste one after `SAXO_TOKEN=`. Simpler, but
 it dies every day and cannot refresh itself.
